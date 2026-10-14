@@ -19,6 +19,37 @@ the service you're touching.
 
 ---
 
+- **Audit** (`@audit`, `src/audit.rs` — **not** a service file; #124, ADR
+  0006) — virtual: no client, no cache, nothing in `build_services`
+  (`ServiceType::is_virtual`). `load_service_resources` short-circuits it and
+  runs every check over the warm caches (`App::run_audit`, the `@all` walk).
+  **`r` loads the missing sources**: `load_audit_sources` spawns
+  `headless::list_all` for each uncached `audit::SOURCES` service, and the
+  results come back as `Event::AuditSourceLoaded`, written **to the cache only**
+  (never `resources`, and `loading` stays false). The audit re-runs as each one
+  lands; checks in flight say `loading…`. Already-cached sources are left
+  alone, since `r` in that service reloads it. `audit_generation` (bumped
+  beside the LazyStore replacement on profile, region and role switches)
+  drops late results, so the old account's rows can't be cached under the new
+  one. Checks are pure fns over list-time
+  data only. **Before adding a check**, confirm its field is filled at *list*
+  time: KMS `rotation_enabled`, IAM user keys/MFA, snapshot sharing and S3
+  `policy_status_public` are all lazy (the field exists but is `None` in the
+  cache), so they wait for #206. Account checks read the IAM Account sub-tab's
+  synthetic `IamAccountSettings` row (summary keys `AccountMFAEnabled` /
+  `AccountAccessKeysPresent`), so **renaming those summary keys silently kills
+  them**. Security groups are deduped across `@ec2` and `@vpc` by group id.
+  RDS cluster members are skipped for encryption (reported once on the
+  cluster). S3 other-region stubs and unreadable public-access blocks become
+  "not checked" notes, never findings: an unknown posture isn't an open one.
+  Row ids are `check:resource-id` (unique per finding, stable across `r`); the
+  list's second column is `list_note` via `resource_list::id_cell`. `⏎` jumps
+  through `jump_to_cached_resource` (list row, or the pane's `Resource ID`
+  row); `l` reads the finding. `neboto audit` loads `AUDIT_SOURCES` (EC2,
+  RDS, S3, EKS, IAM; `@vpc` is skipped as a duplicate) and exits 3 on a finding
+  at or above `--fail-on`. A failed load prints a stderr warning and turns into
+  "not checked" rows.
+
 - **SSM** (`@ssm`, `ssm.rs`) — sub-tabs Parameters/Documents/Fleet/Patch/
   **Associations** (5)/**Run Command** (6)/**Automation** (7)/**Maint
   Windows** (8)/**OpsItems** (9)/**Sessions** (0 — the tenth-tab key, like
