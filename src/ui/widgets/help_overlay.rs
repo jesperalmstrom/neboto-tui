@@ -27,6 +27,7 @@ const LEFT_SECTIONS: &[Section] = &[
             ("^d / ^u", "half page"),
             ("l / → / ⏎", "open details · follow →"),
             ("⌫ / Ctrl-O", "history back"),
+            ("Ctrl-F", "history forward"),
             ("`", "jump list (history)"),
             ("B / '", "bookmark / bookmarks"),
             ("Tab · 1–9", "sub-tabs"),
@@ -93,6 +94,7 @@ const RIGHT_SECTIONS: &[Section] = &[
             ("@all text", "search all cached services (⇥ steps through them)"),
             ("tag:k=v", "exact tag filter"),
             ("Tab", "complete @prefix"),
+            ("↑ / ↓", "earlier searches (this session)"),
         ],
     },
     Section {
@@ -109,6 +111,7 @@ const RIGHT_SECTIONS: &[Section] = &[
             ("click", "select · tabs · hints · badges"),
             ("double-click", "⏎ (open · follow · confirm)"),
             ("click → · title bar", "follow link · full width"),
+            ("click ⌫ back · ⌃F fwd", "back · forward through history"),
             ("click ↑ vX.Y.Z", "copy the upgrade command"),
             ("wheel · drag", "scroll · select rows"),
             ("right-click", "back · close a popup or view"),

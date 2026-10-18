@@ -330,6 +330,7 @@ full-width; `\` flattens all sections into one scroll.
 | `Ctrl-d` / `Ctrl-u` | Half page |
 | `l` `→` `⏎` | Open the detail pane |
 | `⌫` `Ctrl-O` | Back through history |
+| `Ctrl-F` | Forward again, after going back |
 | `Tab` / `Shift-Tab`, `1`–`9`, `0` | Switch sub-tab |
 | `H` / `L` | Previous / next sub-tab (from either pane) |
 | `a` | Hide noisy rows (defaults, automated snapshots, passed checks…) |
@@ -350,7 +351,8 @@ full-width; `\` flattens all sections into one scroll.
 | `[[` / `]]` | Previous / next group header |
 | `l` `→` `⏎` | Follow the link under the cursor |
 | `h` `←` `Esc` | Back to the list |
-| `Ctrl-O` | Back through history |
+| `⌫` `Ctrl-O` | Back through history (the footer names where: `⌫ back to EC2 i-0abc`) |
+| `Ctrl-F` | Forward again, after going back (`⌃F forward to …`) |
 | `/` | Filter the body text |
 | `Ctrl-W` | Wrap long values onto continuation rows (toggle) |
 | `y` / `c` | Copy the row, or the visual selection |
@@ -386,6 +388,7 @@ the faster route, but nothing needs it.
 | Click a `→` | Follow that link |
 | Click the `↑ vX.Y.Z` chip | Copy the upgrade command (shown when a newer release is out) |
 | Click the detail pane's title bar | Full width (`Z`) |
+| Click `⌫ back to …` / `⌃F forward to …` in the detail footer | Back / forward through history |
 | Wheel | Scroll the list, the detail body, a picker, or an in-pane view (the log tail pauses following, as `k` does) |
 | Drag | Select a range of rows (then `y` copies it) |
 | Right-click | Back (`Ctrl-O`); in a popup or an in-pane view (`m`, `t`, `o`, `i`, `W`, `U`, `N`), close it |
@@ -410,6 +413,8 @@ arn:aws:iam::…       paste an ARN — it fuzzy-matches rather than erroring
 ```
 
 Typing `@e` pops a completion dropdown; `Tab` completes to the first match.
+`↑` / `↓` in the search bar recall this session's earlier searches (in memory
+only, never written to disk).
 Matching is fuzzy (Skim) with a score threshold, over every indexed field — ids,
 names, IPs, CIDRs, AZs, tags, ARNs, usernames, emails, and per-service extras
 like every secondary private IP on an ENI or every resource id in a GuardDuty
@@ -507,6 +512,7 @@ template.
 |---|---|
 | `default_service` | Load this service on startup (omit for the welcome splash) |
 | `default_region`, `default_profile` | Where to start |
+| `pinned_services` | Service chips on the strip from startup, e.g. `["ec2", "ecs", "lambda"]` (nothing loads until you open one) |
 | `show_banner` | ASCII banner on startup |
 | `watch`, `watch_interval` | Start in watch mode, and its cadence in seconds |
 | `detail_flat` | Start with the flat all-sections detail view |

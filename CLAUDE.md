@@ -91,7 +91,9 @@ AWS.
   `list_resources()`, `get_resource_details()`.
 - **`Resource`** (`src/aws/resource.rs`): `search_text()`, `details()` (flat
   key-value fallback), `console_url()`, `is_noise()`, `state()`, `as_any()`
-  (for downcasting). Heterogeneous collections are `Box<dyn Resource>`.
+  (for downcasting), `list_summary()` (the list's dim second column — an
+  instance's type, a function's runtime; default: the id). Heterogeneous
+  collections are `Box<dyn Resource>`.
 - **`ServiceType`** (`src/aws/service.rs`): one variant per service;
   `from_prefix()` maps `@ec2`→`EC2`; `is_global()` true for IAM / Organizations
   / Cost / CloudFront / Trusted Advisor / Global Accelerator / Health /
@@ -1001,6 +1003,10 @@ and the approaches you rejected are the part nobody can recover from your code.
   `l`/`→`/`Enter` (drill into detail), `⌫`/`Ctrl-O`
   (nav-back through history — **not** `h`/`←`: from the detail pane they go
   back to the list, and a second tap popping history lost your place),
+  `Ctrl-F` (forward again; intercepted at the top of `handle_key` like `,`,
+  since plain-`f` arms that ignore modifiers would swallow it — and going
+  back from live first records "here", `park_here`, so forward has
+  somewhere to return to),
   `Tab`/`Shift-Tab` (cycle sub-tabs), `1`–`9` (jump to sub-tab), `H`/`L`
   (previous/next sub-tab from **either** pane — `step_sub_tab` replays
   `Shift-Tab`/`Tab` through the list handlers and re-opens the new tab's
@@ -1045,8 +1051,10 @@ and the approaches you rejected are the part nobody can recover from your code.
   Detail pane — `j`/`k`, `gg`/`G`,
   `[[`/`]]` (group headers), `Tab`/`Shift-Tab` + `1`–`9` (sections),
   `H`/`L` (sub-tabs, as in the list pane),
-  `l`/`→`/`Enter` (follow jump), `h`/`←`/`Esc` (back to list), `Ctrl-O`
-  (nav-back through history, same as the list pane), `y`/`e`,
+  `l`/`→`/`Enter` (follow jump), `h`/`←`/`Esc` (back to list), `⌫`/`Ctrl-O`
+  (nav-back through history, same as the list pane; the footer names the
+  targets as clickable `⌫ back to …` / `⌃F forward to …` — regions placed
+  from the text `detail_footer` drew, `App.detail_footer_nav`), `y`/`e`,
   `m`/`o`/`i`/`t` (rich views), `W`/`U`/`N` (timeline / referenced-by /
   network-access lenses, also from the list pane), `X` (export detail;
   `Ctrl-X` exports the list),
@@ -1205,7 +1213,9 @@ and the approaches you rejected are the part nobody can recover from your code.
   and shows as a clickable `↑ vX.Y.Z` service-strip chip),
   `cache_ttl` (base cache freshness in seconds, default 300) +
   `[cache_ttls]` (per-service overrides keyed by any `@`-search prefix;
-  unknown prefixes are ignored).
+  unknown prefixes are ignored),
+  `pinned_services` (prefixes seeded into `visited_services` so their strip
+  chips show before they load; unknown prefixes warn at startup).
   No `default_service` ⇒ welcome splash, nothing loads.
 - **`src/cli.rs`**: clap `Cli` (parsed in `main` before the runtime).
   `-s/--service`, `-r/--region`, `-p/--profile`, `--endpoint-url`,

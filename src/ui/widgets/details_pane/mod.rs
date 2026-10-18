@@ -330,14 +330,55 @@ pub use workspaces::*;
 pub use xray::*;
 
 pub fn render_details_pane(app: &App, area: Rect, frame: &mut Frame) {
+    app.detail_footer_nav.replace(None);
     render_details_pane_inner(app, area, frame);
     render_ownership_ribbon(app, area, frame);
+    record_nav_hint_regions(app, area);
     // The pane's top border (its title bar) toggles full width, as `Z` does:
     // the mouse route to the one layout key with no visible control.
     if area.height > 0 {
         app.push_click_region(
             Rect { height: 1, ..area },
             crate::app::ClickAction::Press(crossterm::event::KeyCode::Char('Z')),
+        );
+    }
+}
+
+/// The footer's `⌫ back to …` / `⌃F forward to …` hints are click targets
+/// (as `⌫` / `Ctrl-F`). The footer is right-aligned inside the bottom
+/// border's corners, so each hint's columns follow from the text
+/// `detail_footer` recorded; a footer too wide for the pane is truncated by
+/// the block, so it gets no regions rather than wrong ones.
+fn record_nav_hint_regions(app: &App, area: Rect) {
+    use crate::app::ClickAction;
+    use unicode_width::UnicodeWidthStr;
+    let Some(footer) = app.detail_footer_nav.take() else {
+        return;
+    };
+    let inner_w = area.width.saturating_sub(2) as usize;
+    let footer_w = footer.width();
+    if area.height < 2 || footer_w > inner_w {
+        return;
+    }
+    let start = area.x + 1 + (inner_w - footer_w) as u16;
+    let hints = [
+        (
+            app.nav_back_hint().map(|to| format!("⌫ back to {to}")),
+            ClickAction::Press(crossterm::event::KeyCode::Backspace),
+        ),
+        (app.nav_forward_hint().map(|to| format!("⌃F forward to {to}")), ClickAction::NavForward),
+    ];
+    for (hint, action) in hints {
+        let Some(hint) = hint else { continue };
+        let Some(at) = footer.find(&hint) else { continue };
+        app.push_click_region(
+            Rect {
+                x: start + footer[..at].width() as u16,
+                y: area.y + area.height - 1,
+                width: hint.width() as u16,
+                height: 1,
+            },
+            action,
         );
     }
 }
@@ -4306,7 +4347,10 @@ fn jump_indicator(app: &App, key: &str, value: &str) -> Option<bool> {
 /// the conditional `m metrics` / `t tail` (gated by `supports_metrics_overlay`
 /// / `supports_log_tail`). The footer therefore auto-includes only the section
 /// count, detail-pane `/ search`, and `h back` (plus a "⏎ go to resource" hint
-/// when the row references another resource), and `extras` should carry **only
+/// when the row references another resource, and `⌫ back to <where>` when
+/// there's history to go back through — `h` then reads `h list`, since it
+/// returns to the list rather than to the resource you jumped from), and
+/// `extras` should carry **only
 /// genuinely pane-specific** affordances whose key isn't already global — e.g.
 /// `o objects` (S3), `i items` (DynamoDB), `d download` (Lambda code), `f
 /// search` (log group), `x reveal · Y copy value` (secrets). Do NOT put
@@ -4343,8 +4387,16 @@ fn detail_footer(app: &App, focused: bool, sections: usize, extras: &str) -> Str
     if app.supports_trail_lens() {
         parts.push("W trail");
     }
-    parts.push("h back");
-    format!(" {} ", parts.join(" · "))
+    let back = app.nav_back_hint().map(|to| format!("⌫ back to {to}"));
+    let forward = app.nav_forward_hint().map(|to| format!("⌃F forward to {to}"));
+    parts.extend(back.as_deref());
+    parts.extend(forward.as_deref());
+    parts.push(if back.is_some() || forward.is_some() { "h list" } else { "h back" });
+    let footer = format!(" {} ", parts.join(" · "));
+    if back.is_some() || forward.is_some() {
+        app.detail_footer_nav.replace(Some(footer.clone()));
+    }
+    footer
 }
 
 /// One aligned key/value row for the header: `  key_padded  value`.
