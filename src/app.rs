@@ -34,7 +34,7 @@ use crate::event::{Event, LoadProgress};
 use crate::ui::widgets::ct_filter_modal::{CtFilterModalState, CtFilterPhase};
 use crate::ui::widgets::profile_selector::ProfileSelectorState;
 use crate::ui::widgets::quota_service_selector::QuotaServiceSelectorState;
-use crate::ui::widgets::region_selector::RegionSelectorState;
+use crate::ui::widgets::region_selector::{RegionCount, RegionSelectorState};
 use crate::ui::widgets::service_selector::ServiceSelectorState;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
@@ -1181,7 +1181,24 @@ pub struct NavLocation {
     /// order) — restored by cycling from the default section. Name-keyed so
     /// stale bookmarks survive a pane reshuffle (unknown name = default).
     #[serde(default)]
-    pub detail_section: Option<String>}
+    pub detail_section: Option<String>,
+    /// The region the location was captured in (a region code); `None` for
+    /// a global service, and for history and bookmarks written before this
+    /// existed — those restore in whichever region is current, as they
+    /// always did. Restoring one from another region switches there first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>}
+
+impl NavLocation {
+    /// The captured region, when it isn't `current` — what the footer hint,
+    /// the jump list and the bookmark list name beside the place.
+    pub fn other_region(&self, current: Region) -> Option<Region> {
+        self.region
+            .as_deref()
+            .and_then(Region::from_str)
+            .filter(|r| *r != current)
+    }
+}
 
 /// Cap on the navigation timeline length (oldest entries drop off the front).
 const NAV_HISTORY_MAX: usize = 25;
@@ -1970,6 +1987,17 @@ pub struct App {
     /// Bumped on every profile/region/role switch: an `@audit` source load
     /// (`r` in `@audit`) from before the switch is dropped on arrival.
     pub audit_generation: u64,
+    /// Config `regions` (#92), in order: the `R` picker lists them first and
+    /// counts the current service in each.
+    pub configured_regions: Vec<Region>,
+    /// The `R` picker's fan-out (#92): the current service listed in each
+    /// configured region, straight into that region's cache slot. An entry
+    /// is here only while a region loads or after it failed — a success *is*
+    /// the cache entry, so the count expires with the cache TTL.
+    pub region_fanout: HashMap<(ServiceType, Region), RegionCount>,
+    /// Bumped on a profile/role switch (another account). A region switch
+    /// keeps it: the other regions' lists are still this account's.
+    pub region_fanout_generation: u64,
     /// `@audit` sources `r` is loading right now.
     pub audit_loading: Vec<ServiceType>,
     /// Sources that failed during the current `r`, reported once all land.
@@ -3067,6 +3095,9 @@ impl App {
             loading_started: false,
             load_generation: Arc::new(AtomicU64::new(0)),
             audit_generation: 0,
+            configured_regions: config.configured_regions().0.unwrap_or_default(),
+            region_fanout: HashMap::new(),
+            region_fanout_generation: 0,
             audit_loading: Vec::new(),
             audit_load_failures: Vec::new(),
             audit_facts: None,
@@ -3460,6 +3491,9 @@ impl App {
             Event::AuditFactsLoaded { generation, facts } => {
                 self.handle_audit_facts_loaded(generation, facts);
             }
+            Event::RegionFanoutLoaded { generation, service, region, result } => {
+                self.handle_region_fanout_loaded(generation, service, region, result);
+            }
             Event::ResourceRefreshed { id, resource, quiet } => {
                 // Swap the resource in place by id — same position, so the list
                 // and the current selection don't move. The detail pane reads the
@@ -3484,6 +3518,14 @@ impl App {
             }
             Event::RegionSwitchRequested { region } => {
                 self.switch_region(region).await?;
+                // A cache hit (the region was listed within the TTL — by an
+                // earlier visit or the `R` fan-out) fills `resources` without
+                // a load, so no FullyLoaded will filter them or resolve a
+                // cross-region jump: do both now, as `trigger_jump` does.
+                if !self.loading && self.current_region == region {
+                    self.update_search();
+                    self.resolve_pending_jump(event_tx);
+                }
             }
             Event::ProfileSwitchRequested { profile } => {
                 self.switch_profile(profile, event_tx).await?;
@@ -4506,6 +4548,11 @@ impl App {
                 KeyCode::Enter => {
                     if let Some(region) = self.region_selector.selected_region() {
                         self.region_selector.hide();
+                        // A region switch is a place you left, like a service
+                        // switch: `⌫` comes back to this row in this region.
+                        if region != self.current_region {
+                            self.record_location();
+                        }
                         self.details_focused = false;
                         self.details_selected_index = None;
                         let _ = event_tx.send(Event::RegionSwitchRequested { region });
@@ -6128,6 +6175,7 @@ impl App {
                 }
                 KeyCode::Char('R') => {
                     self.region_selector.show(self.current_region);
+                    self.start_region_fanout(event_tx);
                 }
                 KeyCode::Char('P') => {
                     self.profile_selector.show(
@@ -8908,6 +8956,7 @@ impl App {
             // Region selector
             (KeyCode::Char('R'), KeyModifiers::SHIFT) => {
                 self.region_selector.show(self.current_region);
+                self.start_region_fanout(event_tx);
             }
             (KeyCode::Char('P'), KeyModifiers::SHIFT) => {
                 self.profile_selector.show(
@@ -9812,6 +9861,138 @@ impl App {
         }
     }
 
+    /// The service the `R` picker counts across config `regions` (#92), if
+    /// any: a regional, non-virtual service whose list doesn't depend on App
+    /// state. Every service that does (Cost's grouping, GuardDuty's severity
+    /// scope, CloudTrail's query…) is variant-cached, and a fresh
+    /// `build_services` would list it with the default instead.
+    fn region_fanout_service(&self) -> Option<ServiceType> {
+        let svc = self.current_service?;
+        (!self.configured_regions.is_empty()
+            && !self.all_search_mode
+            && !svc.is_global()
+            && !svc.is_virtual()
+            && self.cache_variant(svc).is_none())
+        .then_some(svc)
+    }
+
+    /// Opening `R`: list the current service in every configured region
+    /// that has no fresh cache entry, a few at a time, each into its own
+    /// cache slot. The current region is the normal load's; a region already
+    /// loading is left alone, and so is one that said `denied` (an SCP region
+    /// deny doesn't lift between two presses). A failure is retried on the
+    /// next open.
+    pub(crate) fn start_region_fanout(&mut self, event_tx: &mpsc::UnboundedSender<Event>) {
+        use futures::StreamExt;
+        let Some(svc) = self.region_fanout_service() else {
+            return;
+        };
+        let targets: Vec<Region> = self
+            .configured_regions
+            .iter()
+            .copied()
+            .filter(|r| *r != self.current_region)
+            .filter(|r| self.cache.get_ref(&svc, r, None).is_none())
+            .filter(|r| {
+                !matches!(
+                    self.region_fanout.get(&(svc, *r)),
+                    Some(RegionCount::Loading | RegionCount::Denied)
+                )
+            })
+            .collect();
+        let generation = self.region_fanout_generation;
+        let mut loads = Vec::new();
+        for region in targets {
+            let clients = self.aws_clients.for_region(region);
+            let services =
+                Self::build_services(&clients, self.controltower_audit.clone(), &self.org_access_roles);
+            let Some(service) = services.get(&svc).cloned() else {
+                continue;
+            };
+            self.region_fanout.insert((svc, region), RegionCount::Loading);
+            let tx = event_tx.clone();
+            loads.push(async move {
+                // Partial-load warnings are dropped: the rows still count, and
+                // switching to the region reloads it with the warning shown.
+                let result = crate::headless::list_all(service, svc)
+                    .await
+                    .map(|(rows, _)| rows)
+                    .map_err(|f| f.message().to_string());
+                let _ = tx.send(Event::RegionFanoutLoaded { generation, service: svc, region, result });
+            });
+        }
+        if loads.is_empty() {
+            return;
+        }
+        tokio::spawn(async move {
+            futures::stream::iter(loads)
+                .buffer_unordered(crate::headless::REGION_FANOUT)
+                .collect::<Vec<()>>()
+                .await;
+        });
+    }
+
+    fn handle_region_fanout_loaded(
+        &mut self,
+        generation: u64,
+        service: ServiceType,
+        region: Region,
+        result: std::result::Result<Vec<Box<dyn Resource>>, String>,
+    ) {
+        if generation != self.region_fanout_generation {
+            return;
+        }
+        match result {
+            Ok(rows) => {
+                self.region_fanout.remove(&(service, region));
+                self.cache.insert(service, region, None, rows);
+            }
+            Err(e) => {
+                let status = if crate::headless::is_denied_message(&e) {
+                    RegionCount::Denied
+                } else {
+                    RegionCount::Failed
+                };
+                self.region_fanout.insert((service, region), status);
+            }
+        }
+    }
+
+    /// What the `R` picker shows beside each region: the current service's
+    /// rows in the active sub-tab (so EC2's Instances tab counts instances,
+    /// not every ENI and volume), from that region's cache, or the fan-out's
+    /// status. Nothing for a region that hasn't been listed — never a `0`.
+    pub fn region_counts(&self) -> HashMap<Region, RegionCount> {
+        let mut out = HashMap::new();
+        let Some(svc) = self.region_fanout_service() else {
+            return out;
+        };
+        let filter = self.active_type_filter();
+        let regions = std::iter::once(self.current_region).chain(self.configured_regions.iter().copied());
+        for region in regions {
+            if let Some(status) = self.region_fanout.get(&(svc, region)) {
+                out.insert(region, *status);
+            } else if let Some(rows) = self.cache.get_ref(&svc, &region, None) {
+                let n = rows
+                    .iter()
+                    .filter(|r| filter.is_none_or(|f| type_filter_matches(f, r.resource_type())))
+                    .count();
+                out.insert(region, RegionCount::Count(n));
+            }
+        }
+        out
+    }
+
+    /// What `region_counts` counts, for the picker's title: the sub-tab's
+    /// type(s), else the service.
+    pub fn region_count_label(&self) -> Option<String> {
+        let svc = self.region_fanout_service()?;
+        Some(match self.active_type_filter() {
+            Some(f) => f.replace('|', " + "),
+            None => svc.name().to_string(),
+        })
+    }
+
     /// A profile/region/role switch: in-flight `@audit` loads belong to the
     /// old account or region.
     fn drop_audit_loads(&mut self) {
@@ -10383,8 +10564,10 @@ impl App {
                 // Recreate all services with new clients
                 self.recreate_services();
 
-                // Clear the cache (old region's data is no longer valid)
-                self.cache = self.new_cache();
+                // The cache stays: it's keyed by region, so the old region's
+                // lists are still that region's (and switching back within
+                // the TTL is instant), and the `R` fan-out (#92) has filled
+                // the new region's slot when it could.
 
                 // SSM connectability is region-scoped — drop it so it refetches.
                 self.ssm_instance_status.clear();
@@ -10456,6 +10639,8 @@ impl App {
         // fetch — no per-map hand-listing.
         self.lazy = crate::lazy::LazyStore::new(self.lazy.epoch() + 1);
         self.drop_audit_loads();
+        self.region_fanout_generation += 1;
+        self.region_fanout.clear();
         // An armed deep export was collecting the *old* account's sections.
         self.cancel_pending_deep_export();
         // Lazy detail state is credential-scoped — let the flat-view trigger
@@ -20290,7 +20475,8 @@ impl App {
                 label: format!("S3 · s3://{}/{}", bucket, basename),
                 s3_object_path: Some((bucket, key)),
                 details_focused: false,
-                detail_section: None};
+                detail_section: None,
+                region: Some(self.current_region.as_str().to_string())};
             self.bookmarks.push(loc);
             self.s3_object_browser.message = Some("Bookmarked".to_string());
         }
@@ -21929,15 +22115,26 @@ impl App {
             label,
             s3_object_path: None,
             details_focused,
-            detail_section})
+            detail_section,
+            region: self.location_region(service)})
+    }
+
+    /// The region a location in `service` is captured in: the current one,
+    /// or `None` for a global service (the same list in every region, so
+    /// restoring it must never switch region).
+    fn location_region(&self, service: ServiceType) -> Option<String> {
+        (!service.is_global()).then(|| self.current_region.as_str().to_string())
     }
 
     /// Whether `loc` is the history's newest entry already (same service,
     /// query and row) — `record_location`'s de-dup, and how going back from
     /// live tells whether "here" still needs recording.
-    fn is_history_top(&self, service: ServiceType, query: &str, selected_id: Option<&str>) -> bool {
+    fn is_history_top(&self, loc: &NavLocation) -> bool {
         self.nav_history.last().is_some_and(|top| {
-            top.service == service && top.query == query && top.selected_id.as_deref() == selected_id
+            top.service == loc.service
+                && top.query == loc.query
+                && top.selected_id == loc.selected_id
+                && top.region == loc.region
         })
     }
 
@@ -21947,7 +22144,12 @@ impl App {
             return false;
         };
         let id = self.get_selected_resource().map(|r| r.id().to_string());
-        self.is_history_top(service, &self.location_query(service), id.as_deref())
+        self.nav_history.last().is_some_and(|top| {
+            top.service == service
+                && top.query == self.location_query(service)
+                && top.selected_id == id
+                && top.region == self.location_region(service)
+        })
     }
 
     /// Going back (or into the jump list) from live first records where you
@@ -21962,7 +22164,7 @@ impl App {
         let Some(loc) = self.current_location() else {
             return 0;
         };
-        if !self.is_history_top(loc.service, &loc.query, loc.selected_id.as_deref()) {
+        if !self.is_history_top(&loc) {
             self.nav_history.push(loc);
         }
         let overflow = self.nav_history.len().saturating_sub(NAV_HISTORY_MAX);
@@ -21993,7 +22195,7 @@ impl App {
         let Some(loc) = self.current_location() else {
             return;
         };
-        let is_dup_top = self.is_history_top(loc.service, &loc.query, loc.selected_id.as_deref());
+        let is_dup_top = self.is_history_top(&loc);
         record_into(
             &mut self.nav_history,
             &mut self.nav_cursor,
@@ -22042,9 +22244,13 @@ impl App {
         // Re-select the exact row by id once results are present (resolve_pending_jump
         // matches the id; the *Loaded handlers resolve it on a cache miss).
         self.pending_jump = loc.selected_id.clone();
-        // Nav-back is same-region; clear any stale cross-region guard so the
-        // selection resolves here regardless of `current_region`.
-        self.pending_jump_region = None;
+        // A location from another region switches there first, through the
+        // cross-region jump `@explorer` uses: the guard holds the selection
+        // until that region's list is in (a cache hit when it's warm — the
+        // cache survives region switches). Otherwise it clears any stale
+        // guard, so the selection resolves here.
+        let other_region = loc.other_region(self.current_region);
+        self.pending_jump_region = other_region;
         // Fidelity: a location captured at detail depth restores into the
         // detail pane — at its captured section — once its row resolves. S3
         // object bookmarks re-open the object browser instead, so the focus
@@ -22066,9 +22272,12 @@ impl App {
             let prefix = key.rsplit_once('/').map(|(p, _)| format!("{}/", p)).unwrap_or_default();
             self.s3_object_browser.visible = true;
             self.s3_object_browser.bucket = bucket;
-            self.s3_object_browser.region = self.current_region.as_str().to_string();
+            self.s3_object_browser.region = other_region.unwrap_or(self.current_region).as_str().to_string();
             self.s3_object_browser.set_prefix(prefix);
             self.pending_s3_object_key = Some(key);
+        }
+        if let Some(region) = other_region {
+            let _ = event_tx.send(Event::RegionSwitchRequested { region });
         }
 
         self.suppress_nav_record = false;
@@ -22111,8 +22320,17 @@ impl App {
     /// Where `Ctrl-F` would go, in the same short form as `nav_back_hint`.
     pub(crate) fn nav_forward_hint(&self) -> Option<String> {
         let idx = nav_forward_target(self.nav_history.len(), self.nav_cursor)?;
-        let loc = &self.nav_history[idx];
-        Some(nav_hint_label(loc.service, loc.selected_id.as_deref()))
+        Some(self.nav_location_hint(&self.nav_history[idx]))
+    }
+
+    /// `nav_hint_label`, plus the region when it isn't this one — the step
+    /// switches region, so the hint should say so.
+    fn nav_location_hint(&self, loc: &NavLocation) -> String {
+        let label = nav_hint_label(loc.service, loc.selected_id.as_deref());
+        match loc.other_region(self.current_region) {
+            Some(r) => format!("{label} · {r}"),
+            None => label,
+        }
     }
 
     /// Where `⌫` / `Ctrl-O` would go, shortened for the detail footer:
@@ -22122,10 +22340,13 @@ impl App {
         let idx = self.nav_back_index()?;
         let loc = &self.nav_history[idx];
         let here = self.get_selected_resource().map(|r| r.id().to_string());
-        if Some(loc.service) == self.current_service && loc.selected_id == here {
+        if Some(loc.service) == self.current_service
+            && loc.selected_id == here
+            && loc.other_region(self.current_region).is_none()
+        {
             return None;
         }
-        Some(nav_hint_label(loc.service, loc.selected_id.as_deref()))
+        Some(self.nav_location_hint(loc))
     }
 
     /// Backtick: toggle the jump-list picker (most-recent first). Opens with the

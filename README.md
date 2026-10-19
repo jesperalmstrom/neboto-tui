@@ -354,7 +354,7 @@ full-width; `\` flattens all sections into one scroll.
 | `[[` / `]]` | Previous / next group header |
 | `l` `→` `⏎` | Follow the link under the cursor |
 | `h` `←` `Esc` | Back to the list |
-| `⌫` `Ctrl-O` | Back through history (the footer names where: `⌫ back to EC2 i-0abc`) |
+| `⌫` `Ctrl-O` | Back through history (the footer names where: `⌫ back to EC2 i-0abc`, plus the region when going back switches it) |
 | `Ctrl-F` | Forward again, after going back (`⌃F forward to …`) |
 | `/` | Filter the body text |
 | `Ctrl-W` | Wrap long values onto continuation rows (toggle) |
@@ -515,7 +515,7 @@ template.
 |---|---|
 | `default_service` | Load this service on startup (omit for the welcome splash) |
 | `default_region`, `default_profile` | Where to start |
-| `regions` | The regions you work in, e.g. `["ap-southeast-2", "us-east-1"]`: what `neboto ls --regions` lists across, and the top of the `R` picker |
+| `regions` | The regions you work in, e.g. `["ap-southeast-2", "us-east-1"]`: what `neboto ls --regions` lists across; the `R` picker lists them first with the current service's count in each |
 | `pinned_services` | Service chips on the strip from startup, e.g. `["ec2", "ecs", "lambda"]` (nothing loads until you open one) |
 | `show_banner` | ASCII banner on startup |
 | `watch`, `watch_interval` | Start in watch mode, and its cadence in seconds |
@@ -556,6 +556,14 @@ The standard AWS chain: environment variables, `~/.aws/credentials`,
 `~/.aws/config` (SSO profiles, IAM roles), then instance/task role. The startup
 region comes from `AWS_DEFAULT_REGION` or the active profile; `R` switches at
 runtime without a restart.
+
+With config `regions` set (your working set, e.g. `["ap-southeast-2",
+"us-east-1"]`), opening `R` also lists the current service in each of those
+regions and shows how many rows of the current tab each has (`3` EC2
+instances, `denied` where an SCP blocks the region). Those lists go into the
+cache, so switching to one of the regions afterwards is instant. Regions you
+haven't listed show nothing rather than `0`; global services and ones scoped
+by a toggle (Cost, GuardDuty's severity, CloudTrail's query…) aren't counted.
 
 A `credential_process` that asks for something in the terminal works too, such
 as granted with the `pass` keyring, where gpg's pinentry asks for your
